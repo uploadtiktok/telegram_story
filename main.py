@@ -20,10 +20,8 @@ TELEGRAM_API_HASH = os.getenv("TG_API_HASH")
 TELEGRAM_SESSION = os.getenv("TG_SESSION")
 COOKIES_TEXT = os.getenv("COOKIES_TEXT") 
 
-# إعدادات المستودع والروابط
 REPO_NAME = "uploadtiktok/telegram_story"
-VIDEO_URL_REF = "https://youtube.com/shorts/oG3WdBgRgxo?si=sMYhFhPMkB8DtYyF"
-DEFAULT_START_DATE = "2026-03-11T00:00:00Z"
+VIDEO_URL_REF = "https://youtube.com/shorts/oG3WdBgRgxo"
 FILE_PATH = "youtube_shorts_links.txt"
 BRANCH = "main"
 
@@ -31,19 +29,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
 COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
-# --- وظيفة إنشاء ملف الكوكيز ---
 def create_cookies_file():
     if COOKIES_TEXT:
         try:
             with open(COOKIES_FILE, "w", encoding="utf-8") as f:
                 f.write(COOKIES_TEXT)
-            print("✅ Cookies file created from Secret.")
+            print("✅ Cookies file created successfully.")
             return True
         except Exception as e:
             print(f"❌ Error writing cookies: {e}")
     return False
 
-# --- وظائف GitHub API ---
 def get_github_file():
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
     headers = {"Authorization": f"token {GH_TOKEN}"}
@@ -62,10 +58,9 @@ def update_github_file(new_content, sha, message):
     res = requests.put(url, headers=headers, json=data)
     return res.status_code in [200, 201]
 
-# --- وظائف اليوتيوب ---
 def sync_youtube_links(youtube, current_content):
     lines = [l.strip() for l in current_content.split('\n') if l.strip()]
-    start_date = DEFAULT_START_DATE
+    start_date = "2026-03-11T00:00:00Z"
     channel_id = None
     
     try:
@@ -105,10 +100,11 @@ def sync_youtube_links(youtube, current_content):
     new_links.reverse()
     return lines + new_links
 
-# --- التحميل والرفع ---
 def download_video(url):
     ydl_opts = {
-        'format': 'best[ext=mp4]/best', # الصيغة الأكثر توافقاً
+        # إعدادات الجودة العالية مع الدمج باستخدام FFmpeg
+        'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best',
+        'merge_output_format': 'mp4',
         'outtmpl': TEMP_VIDEO,
         'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
         'quiet': True,
@@ -132,7 +128,7 @@ async def main():
     create_cookies_file()
 
     youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
-    print("🔍 Fetching links...")
+    print("🔍 Fetching and syncing links...")
     content, sha = get_github_file()
     all_links = sync_youtube_links(youtube, content)
     
@@ -145,7 +141,7 @@ async def main():
                 client = TelegramClient(StringSession(TELEGRAM_SESSION), int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
                 await client.start()
                 
-                print("📤 Uploading to Telegram...")
+                print("📤 Uploading to Telegram Story...")
                 file_to_upload = await client.upload_file(TEMP_VIDEO, file_name='video.mp4')
                 
                 await client(SendStoryRequest(
@@ -158,8 +154,8 @@ async def main():
                 ))
                 await client.disconnect()
                 
-                print("✨ Story posted! Updating list...")
-                update_github_file("\n".join(all_links[1:]), sha, "Auto-update: Posted 1 story")
+                print("✨ Story posted! Updating GitHub list...")
+                update_github_file("\n".join(all_links[1:]), sha, "Auto-update: Posted 1 story and synced")
             except Exception as e:
                 print(f"❌ Telegram Error: {e}")
         
