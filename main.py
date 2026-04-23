@@ -18,7 +18,8 @@ GH_TOKEN = os.getenv("GH_TOKEN")
 TELEGRAM_API_ID = os.getenv("TG_API_ID")
 TELEGRAM_API_HASH = os.getenv("TG_API_HASH")
 TELEGRAM_SESSION = os.getenv("TG_SESSION")
-COOKIES_B64 = os.getenv("COOKIES_B64") # الملف المشفر
+# هنا نضع محتوى ملف الكوكيز كنص مباشر (Plain Text)
+COOKIES_TEXT = os.getenv("COOKIES_TEXT") 
 
 REPO_NAME = "uploadtiktok/telegram_story"
 VIDEO_URL_REF = "https://youtube.com/shorts/oG3WdBgRgxo?si=sMYhFhPMkB8DtYyF"
@@ -30,16 +31,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_VIDEO = os.path.join(BASE_DIR, "temp_video.mp4")
 COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
-# --- وظيفة إعادة بناء ملف الكوكيز ---
+# --- وظيفة إنشاء ملف الكوكيز من النص المباشر ---
 def create_cookies_file():
-    if COOKIES_B64:
+    if COOKIES_TEXT:
         try:
-            with open(COOKIES_FILE, "wb") as f:
-                f.write(base64.b64decode(COOKIES_B64))
-            print("Cookies file created from Secret.")
+            with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+                f.write(COOKIES_TEXT)
+            print("Cookies file created from Secret text.")
             return True
         except Exception as e:
-            print(f"Error decoding cookies: {e}")
+            print(f"Error writing cookies: {e}")
     return False
 
 # --- وظائف GitHub API ---
@@ -112,6 +113,7 @@ def download_video(url):
         'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
         'quiet': True,
         'no_warnings': True,
+        'no_cookies_update': True, 
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -127,7 +129,7 @@ async def main():
         print("Missing core Secrets.")
         return
 
-    # 1. إنشاء ملف الكوكيز مؤقتاً
+    # إنشاء ملف الكوكيز من النص
     create_cookies_file()
 
     youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
@@ -153,14 +155,13 @@ async def main():
                 ))
                 await client.disconnect()
                 
-                update_github_file("\n".join(all_links[1:]), sha, "Auto-update: Processed 1 story")
+                update_github_file("\n".join(all_links[1:]), sha, "Auto-update: Posted 1 story")
                 print("Success!")
             except Exception as e:
                 print(f"Update Error: {e}")
         
         if os.path.exists(TEMP_VIDEO): os.remove(TEMP_VIDEO)
     
-    # 2. حذف ملف الكوكيز بعد الانتهاء
     if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
 
 if __name__ == '__main__':
