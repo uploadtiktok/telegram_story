@@ -48,56 +48,39 @@ def get_github_file():
 
 def update_github_file(new_content, sha, message):
     url = f"https://api.github.com/repos/{REPO_NAME}/contents/{FILE_PATH}"
-    headers = {
-        "Authorization": f"token {GH_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
+    headers = {"Authorization": f"token {GH_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     encoded_content = base64.b64encode(new_content.encode('utf-8')).decode('utf-8')
     data = {"message": message, "content": encoded_content, "sha": sha, "branch": BRANCH}
     res = requests.put(url, headers=headers, json=data)
-    if res.status_code not in [200, 201]:
-        print(f"❌ GitHub Update Failed: {res.text}")
-    return res.status_code in [200, 201]
+    if res.status_code in [200, 201]:
+        return res.json()['content']['sha'] # نعيد الـ SHA الجديد لاستخدامه في التحديث التالي
+    return None
 
 def sync_youtube_links(youtube, current_content):
-    # تحويل المحتوى الحالي إلى مجموعة روابط لتجنب التكرار
-    existing_links = set([l.strip() for l in current_content.split('\n') if l.strip()])
+    existing_links = [l.strip() for l in current_content.split('\n') if l.strip()]
+    existing_set = set(existing_links)
     
     try:
-        # 1. الحصول على معرف القناة
         ref_id = re.search(r"(?:v=|shorts/|be/)([^/?&]+)", VIDEO_URL_REF).group(1)
         ref_res = youtube.videos().list(part="snippet", id=ref_id).execute()
         channel_id = ref_res['items'][0]['snippet']['channelId']
 
-        # 2. البحث عن آخر 20 فيديو في القناة (لضمان تغطية أي جديد)
-        search_res = youtube.search().list(
-            part="id", 
-            channelId=channel_id, 
-            maxResults=20, 
-            type="video", 
-            order="date"
-        ).execute()
-
-        new_found = []
+        search_res = youtube.search().list(part="id", channelId=channel_id, maxResults=20, type="video", order="date").execute()
         v_ids = [item['id']['videoId'] for item in search_res.get('items', [])]
         
+        new_found = []
         if v_ids:
-            details = youtube.videos().list(part="contentDetails,snippet", id=",".join(v_ids)).execute()
+            details = youtube.videos().list(part="contentDetails", id=",".join(v_ids)).execute()
             for item in details.get('items', []):
                 video_url = f"https://www.youtube.com/watch?v={item['id']}"
                 dur = isodate.parse_duration(item['contentDetails']['duration']).total_seconds()
-                
-                # إذا كان فيديو قصير (Short) وغير موجود مسبقاً في الملف
-                if dur < 60 and video_url not in existing_links:
+                if dur < 60 and video_url not in existing_set:
                     new_found.append(video_url)
         
-        # ترتيب الجديد من الأقدم للأحدث ثم إضافته للقائمة الحالية
         new_found.reverse()
-        final_list = list(existing_links) + new_found
-        return final_list
-    except Exception as e:
-        print(f"⚠️ Sync Warning: {e}")
-        return list(existing_links)
+        return existing_links + new_found, len(new_found) > 0
+    except:
+        return existing_links, False
 
 def download_video(url):
     command = [
@@ -117,17 +100,27 @@ async def main():
     youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
     content, sha = get_github_file()
     
+    # 1. المزامنة الفورية وإضافة الجديد للملف قبل أي شيء
     print("🔄 Checking for new Shorts...")
-    # تحديث القائمة بالجديد
-    all_links = sync_youtube_links(youtube, content)
+    updated_links, has_new = sync_youtube_links(youtube, content)
     
-    if not all_links:
-        print("ℹ️ No links available.")
+    current_sha = sha
+    if has_new:
+        print(f"➕ Found new links. Updating {FILE_PATH}...")
+        new_content = "\n".join(updated_links)
+        # نقوم بتحديث الملف فوراً ونحصل على الـ SHA الجديد
+        current_sha = update_github_file(new_content, sha, "Added new Shorts found on YouTube")
+        if not current_sha:
+            print("❌ Failed to sync new links.")
+            return
+
+    if not updated_links:
+        print("ℹ️ No links to process.")
         return
 
-    # الرابط الأول هو الذي سنرفعه
-    target_url = all_links[0]
-    print(f"🎬 Target: {target_url}")
+    # 2. بدء عملية الرفع للرابط الأول
+    target_url = updated_links[0]
+    print(f"🎬 Target for Story: {target_url}")
 
     if download_video(target_url):
         try:
@@ -144,12 +137,13 @@ async def main():
             ))
             await client.disconnect()
             
-            # تحديث الملف: نحذف الرابط الذي رُفع (all_links[0]) ونحفظ الباقي (بما في ذلك الجديد المكتشف)
-            new_content = "\n".join(all_links[1:])
-            if update_github_file(new_content, sha, "Sync and Posted Story"):
-                print("✅ Successfully updated GitHub and Telegram.")
+            # 3. حذف الرابط الأول فقط بعد نجاح الرفع
+            print("✨ Story posted. Removing from list...")
+            final_content = "\n".join(updated_links[1:])
+            update_github_file(final_content, current_sha, "Removed posted story from list")
+            print("✅ All done.")
         except Exception as e:
-            print(f"❌ Telegram/GitHub Update Error: {e}")
+            print(f"❌ Telegram Error: {e}")
     
     if os.path.exists(TEMP_VIDEO): os.remove(TEMP_VIDEO)
     if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
