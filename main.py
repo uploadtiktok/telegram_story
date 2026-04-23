@@ -12,7 +12,7 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.stories import SendStoryRequest
 from telethon.tl.types import InputMediaUploadedDocument, DocumentAttributeFilename, DocumentAttributeVideo, InputPrivacyValueAllowAll
 
-# --- الإعدادات المسحوبة من Secrets ---
+# --- الإعدادات ---
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 GH_TOKEN = os.getenv("GH_TOKEN")
 TELEGRAM_API_ID = os.getenv("TG_API_ID")
@@ -54,53 +54,84 @@ def update_github_file(new_content, sha, message):
     res = requests.put(url, headers=headers, json=data)
     return res.status_code in [200, 201]
 
+def sync_youtube_links(youtube, current_content):
+    lines = [l.strip() for l in current_content.split('\n') if l.strip()]
+    # تاريخ افتراضي للبحث إذا كان الملف فارغاً
+    start_date = "2026-03-11T00:00:00Z"
+    channel_id = None
+    
+    try:
+        # تحديد معرف القناة من الفيديو المرجعي
+        ref_id = re.search(r"(?:v=|shorts/|be/)([^/?&]+)", VIDEO_URL_REF).group(1)
+        ref_res = youtube.videos().list(part="snippet", id=ref_id).execute()
+        channel_id = ref_res['items'][0]['snippet']['channelId']
+
+        # إذا كان هناك روابط قديمة، نبدأ البحث من تاريخ آخر فيديو موجود
+        if lines:
+            last_url = lines[-1]
+            last_id = re.search(r"(?:v=|shorts/|be/)([^/?&]+)", last_url).group(1)
+            res = youtube.videos().list(part="snippet", id=last_id).execute()
+            if res['items']:
+                pub_date = res['items'][0]['snippet']['publishedAt']
+                dt = datetime.strptime(pub_date, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=1)
+                start_date = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except:
+        pass
+
+    new_links = []
+    next_page = None
+    while True:
+        try:
+            res = youtube.search().list(part="id", channelId=channel_id, maxResults=50, type="video", 
+                                        publishedAfter=start_date, order="date", pageToken=next_page).execute()
+            v_ids = [item['id']['videoId'] for item in res.get('items', [])]
+            if v_ids:
+                details = youtube.videos().list(part="contentDetails", id=",".join(v_ids)).execute()
+                for item in details.get('items', []):
+                    dur = isodate.parse_duration(item['contentDetails']['duration']).total_seconds()
+                    if dur < 60: # فقط فيديوهات أقل من دقيقة (Shorts)
+                        new_links.append(f"https://www.youtube.com/watch?v={item['id']}")
+            next_page = res.get('nextPageToken')
+            if not next_page: break
+        except: break
+        
+    new_links.reverse() # لترتيبها من الأقدم للأحدث في القائمة
+    return lines + new_links
+
 def download_video(url):
-    # استخدام نفس الأوامر الدقيقة التي طلبتها
     command = [
-        "yt-dlp", 
-        "--cookies", COOKIES_FILE, 
-        "--js-runtime", "node",
-        "--remote-components", "ejs:github", 
-        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
-        "--merge-output-format", "mp4", 
-        "-o", TEMP_VIDEO, 
-        url
+        "yt-dlp", "--cookies", COOKIES_FILE, "--js-runtime", "node",
+        "--remote-components", "ejs:github", "-f", 
+        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+        "--merge-output-format", "mp4", "-o", TEMP_VIDEO, url
     ]
     try:
-        # تشغيل الأمر عبر subprocess كما في الكود السابق
         result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode == 0 and os.path.exists(TEMP_VIDEO):
-            return True
-        else:
-            print(f"❌ Download Error: {result.stderr}")
-            return False
-    except Exception as e:
-        print(f"❌ Subprocess Error: {e}")
-        return False
+        return result.returncode == 0 and os.path.exists(TEMP_VIDEO)
+    except: return False
 
 async def main():
-    if not create_cookies_file():
-        print("❌ No cookies found!")
-        return
+    if not create_cookies_file(): return
 
     youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
     content, sha = get_github_file()
     
-    # استخراج الروابط (نفس المنطق السابق)
-    lines = [l.strip() for l in content.split('\n') if l.strip()]
-    if not lines: return
+    # الخطوة الأهم: جلب الروابط الجديدة ودمجها مع القديمة
+    print("🔄 Syncing with YouTube channel...")
+    updated_links = sync_youtube_links(youtube, content)
+    
+    if not updated_links:
+        print("ℹ️ No links to process.")
+        return
 
-    target_url = lines[0]
-    print(f"🎬 Processing: {target_url}")
+    target_url = updated_links[0]
+    print(f"🎬 Current target: {target_url}")
 
     if download_video(target_url):
         try:
             client = TelegramClient(StringSession(TELEGRAM_SESSION), int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
             await client.start()
-            
-            print("📤 Uploading...")
             file_to_upload = await client.upload_file(TEMP_VIDEO)
-            
             await client(SendStoryRequest(
                 peer='me',
                 media=InputMediaUploadedDocument(
@@ -111,10 +142,12 @@ async def main():
             ))
             await client.disconnect()
             
-            print("✨ Success!")
-            update_github_file("\n".join(lines[1:]), sha, "Processed 1 story")
+            # تحديث الملف بحذف الرابط الذي تم رفعه وحفظ الروابط الجديدة المكتشفة
+            new_content = "\n".join(updated_links[1:])
+            update_github_file(new_content, sha, "Auto-sync and posted 1 story")
+            print("✅ Process completed successfully.")
         except Exception as e:
-            print(f"❌ TG Error: {e}")
+            print(f"❌ Telegram Error: {e}")
     
     if os.path.exists(TEMP_VIDEO): os.remove(TEMP_VIDEO)
     if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
