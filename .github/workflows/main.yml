@@ -2,9 +2,8 @@ name: Telegram Story Bot
 
 on:
   schedule:
-    # سيتم التشغيل آلياً كل يوم في الساعة 00:00 بتوقيت جرينتش
     - cron: '0 0 * * *'
-  workflow_dispatch: # يسمح لك بتشغيل البوت يدوياً في أي وقت
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -12,12 +11,17 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4 # تحديث لآخر نسخة من الأكشن
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # تحديث لآخر نسخة من الأكشن
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # استخدام نسخة حديثة لحل مشاكل التوافق
+          python-version: '3.11'
+
+      - name: Install FFmpeg & Node.js
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg nodejs
 
       - name: Install Dependencies
         run: |
@@ -26,13 +30,11 @@ jobs:
 
       - name: Run Python Script
         env:
-          # ربط جميع الأسرار (Secrets) الموجودة في إعدادات ريبو جيت هاب
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
-          COOKIES_TEXT: ${{ secrets.COOKIES_TEXT }} # السكرت النصي للكوكيز
+          COOKIES_TEXT: ${{ secrets.COOKIES_TEXT }}
         run: |
-          # تشغيل الملف الأساسي
           python main.py
