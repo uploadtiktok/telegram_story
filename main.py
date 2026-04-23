@@ -4,7 +4,7 @@ import asyncio
 import base64
 import requests
 import isodate
-import yt_dlp
+import subprocess
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
 from telethon import TelegramClient
@@ -31,13 +31,9 @@ COOKIES_FILE = os.path.join(BASE_DIR, "cookies.txt")
 
 def create_cookies_file():
     if COOKIES_TEXT:
-        try:
-            with open(COOKIES_FILE, "w", encoding="utf-8") as f:
-                f.write(COOKIES_TEXT)
-            print("✅ Cookies file created successfully.")
-            return True
-        except Exception as e:
-            print(f"❌ Error writing cookies: {e}")
+        with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+            f.write(COOKIES_TEXT)
+        return True
     return False
 
 def get_github_file():
@@ -58,109 +54,69 @@ def update_github_file(new_content, sha, message):
     res = requests.put(url, headers=headers, json=data)
     return res.status_code in [200, 201]
 
-def sync_youtube_links(youtube, current_content):
-    lines = [l.strip() for l in current_content.split('\n') if l.strip()]
-    start_date = "2026-03-11T00:00:00Z"
-    channel_id = None
-    
-    try:
-        if lines:
-            last_id = re.search(r"(?:v=|shorts/|be/)([^/?&]+)", lines[-1]).group(1)
-            res = youtube.videos().list(part="snippet", id=last_id).execute()
-            if res['items']:
-                pub_date = res['items'][0]['snippet']['publishedAt']
-                channel_id = res['items'][0]['snippet']['channelId']
-                dt = datetime.strptime(pub_date, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=1)
-                start_date = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        
-        if not channel_id:
-            ref_id = re.search(r"(?:v=|shorts/|be/)([^/?&]+)", VIDEO_URL_REF).group(1)
-            res = youtube.videos().list(part="snippet", id=ref_id).execute()
-            channel_id = res['items'][0]['snippet']['channelId']
-    except:
-        return lines
-
-    new_links = []
-    next_page = None
-    while True:
-        try:
-            res = youtube.search().list(part="id", channelId=channel_id, maxResults=50, type="video", 
-                                        publishedAfter=start_date, order="date", pageToken=next_page).execute()
-            v_ids = [item['id']['videoId'] for item in res.get('items', [])]
-            if v_ids:
-                details = youtube.videos().list(part="contentDetails", id=",".join(v_ids)).execute()
-                for item in details.get('items', []):
-                    dur = isodate.parse_duration(item['contentDetails']['duration']).total_seconds()
-                    if dur < 60:
-                        new_links.append(f"https://www.youtube.com/watch?v={item['id']}")
-            next_page = res.get('nextPageToken')
-            if not next_page: break
-        except: break
-        
-    new_links.reverse()
-    return lines + new_links
-
 def download_video(url):
-    ydl_opts = {
-        # إعدادات الجودة العالية مع الدمج باستخدام FFmpeg
-        'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best',
-        'merge_output_format': 'mp4',
-        'outtmpl': TEMP_VIDEO,
-        'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
-        'quiet': True,
-        'no_warnings': True,
-        'no_cookies_update': True,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            ydl.download([url])
-            return os.path.exists(TEMP_VIDEO)
-        except Exception as e:
-            print(f"❌ Download Error: {e}")
+    # استخدام نفس الأوامر الدقيقة التي طلبتها
+    command = [
+        "yt-dlp", 
+        "--cookies", COOKIES_FILE, 
+        "--js-runtime", "node",
+        "--remote-components", "ejs:github", 
+        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+        "--merge-output-format", "mp4", 
+        "-o", TEMP_VIDEO, 
+        url
+    ]
+    try:
+        # تشغيل الأمر عبر subprocess كما في الكود السابق
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode == 0 and os.path.exists(TEMP_VIDEO):
+            return True
+        else:
+            print(f"❌ Download Error: {result.stderr}")
             return False
+    except Exception as e:
+        print(f"❌ Subprocess Error: {e}")
+        return False
 
 async def main():
-    if not all([YOUTUBE_API_KEY, GH_TOKEN, TELEGRAM_SESSION]):
-        print("❌ Missing core Secrets.")
+    if not create_cookies_file():
+        print("❌ No cookies found!")
         return
 
-    create_cookies_file()
-
     youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
-    print("🔍 Fetching and syncing links...")
     content, sha = get_github_file()
-    all_links = sync_youtube_links(youtube, content)
     
-    if all_links:
-        target_url = all_links[0]
-        print(f"🎬 Processing: {target_url}")
+    # استخراج الروابط (نفس المنطق السابق)
+    lines = [l.strip() for l in content.split('\n') if l.strip()]
+    if not lines: return
 
-        if download_video(target_url):
-            try:
-                client = TelegramClient(StringSession(TELEGRAM_SESSION), int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
-                await client.start()
-                
-                print("📤 Uploading to Telegram Story...")
-                file_to_upload = await client.upload_file(TEMP_VIDEO, file_name='video.mp4')
-                
-                await client(SendStoryRequest(
-                    peer='me',
-                    media=InputMediaUploadedDocument(
-                        file=file_to_upload, mime_type='video/mp4',
-                        attributes=[DocumentAttributeFilename('video.mp4'), DocumentAttributeVideo(duration=0, w=0, h=0)]
-                    ),
-                    caption='', privacy_rules=[InputPrivacyValueAllowAll()]
-                ))
-                await client.disconnect()
-                
-                print("✨ Story posted! Updating GitHub list...")
-                update_github_file("\n".join(all_links[1:]), sha, "Auto-update: Posted 1 story and synced")
-            except Exception as e:
-                print(f"❌ Telegram Error: {e}")
-        
-        if os.path.exists(TEMP_VIDEO): os.remove(TEMP_VIDEO)
+    target_url = lines[0]
+    print(f"🎬 Processing: {target_url}")
+
+    if download_video(target_url):
+        try:
+            client = TelegramClient(StringSession(TELEGRAM_SESSION), int(TELEGRAM_API_ID), TELEGRAM_API_HASH)
+            await client.start()
+            
+            print("📤 Uploading...")
+            file_to_upload = await client.upload_file(TEMP_VIDEO)
+            
+            await client(SendStoryRequest(
+                peer='me',
+                media=InputMediaUploadedDocument(
+                    file=file_to_upload, mime_type='video/mp4',
+                    attributes=[DocumentAttributeFilename('video.mp4'), DocumentAttributeVideo(duration=0, w=0, h=0)]
+                ),
+                caption='', privacy_rules=[InputPrivacyValueAllowAll()]
+            ))
+            await client.disconnect()
+            
+            print("✨ Success!")
+            update_github_file("\n".join(lines[1:]), sha, "Processed 1 story")
+        except Exception as e:
+            print(f"❌ TG Error: {e}")
     
+    if os.path.exists(TEMP_VIDEO): os.remove(TEMP_VIDEO)
     if os.path.exists(COOKIES_FILE): os.remove(COOKIES_FILE)
 
 if __name__ == '__main__':
